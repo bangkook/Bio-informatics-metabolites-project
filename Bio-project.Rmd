@@ -1,0 +1,166 @@
+---
+title: 'Project: Metabolic QTLs and Metabolic Networks'
+author: "Rowaina - Mariam Hossam Aly (20011882)"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installing and Loading Libraries
+``` {r, message = F}
+# Install SNPRelate and GENESIS packages if not already installed
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("SNPRelate")
+#BiocManager::install("GENESIS")
+
+# Load the packages
+library(SNPRelate)
+library(GENESIS)
+library(GWASTools)
+library(dplyr)
+
+```
+
+
+## Task 1: Compute Kinship using GeneABEL
+a. Computing kinship using the  SNPRelate and GENESIS packages in R then report the number of individuals who have a kinship > 0.1:
+- Kinship in genetics refers to the degree of genetic relatedness or the probability that two individuals share a common ancestor or set of ancestors. It quantifies the proportion of genes shared between individuals due to inheritance from common ancestors.
+- GDS stands for Genomic Data Structure. It is a file format used for storing and managing large-scale genomic data efficiently.
+``` {r}
+# Paths to your PLINK files
+ped_file <- "mmc2/Qatari156_filtered_pruned.ped"
+map_file <- "mmc2/Qatari156_filtered_pruned.map"
+gds_file <- "converted_data.gds"
+
+# Convert the PLINK files to GDS format
+snpgdsPED2GDS(ped.fn = ped_file, map.fn = map_file, out.gdsfn = gds_file)
+
+# Open the GDS file
+genofile <- snpgdsOpen(gds_file)
+
+# Calculate the kinship matrix using snpgdsIBDMLE (Maximum Likelihood Estimation)
+ibd <- snpgdsIBDMLE(genofile, kinship = TRUE)
+
+# Extract the kinship matrix
+kinship_matrix <- ibd$kinship
+
+# Convert the kinship matrix to a data frame for easier manipulation
+kinship_df <- as.data.frame(kinship_matrix)
+
+# Identify individuals with kinship > 0.1
+high_kinship_pairs <- sum(kinship_matrix[upper.tri(kinship_matrix)] > 0.1)
+
+# Report the number of such pairs
+cat("Number of individual pairs with kinship > 0.1:", high_kinship_pairs, "\n")
+
+# Close the GDS file
+snpgdsClose(genofile)
+
+```
+``` {r}
+# Save kinship matrix to a CSV file
+write.csv(kinship_matrix, file = "kinship_matrix.csv", row.names = TRUE)
+```
+
+``` {r}
+# Read kinship matrix from the CSV file
+kinship_matrix <- as.matrix(read.csv("kinship_matrix.csv", row.names = 1))
+```
+## Task 2: Compute mQTLs with Mixed Models
+
+a. Compute mQTLs using all SNPs and all metabolites to identify associations and report
+their p-values. You will need to use mixed models to include kinship.
+b. GENESIS provides a fitNullModel function that computes residuals of metabolites from
+the covariates including kinship and a assocTestSingle function that computes the
+mQTLs.
+c. Include the first three principal components in the covariates.
+d. Report significant SNP-Metabolite associations until p < 0.01 in an Excel sheet, showing
+beta values, standard error, effect allele, degree of freedom, and p values. (all values are
+the direct output of assocTestSingle).
+e. Report heritability from the varCompCI function in GENESIS.
+``` {r}
+# Read the PCA results
+pca_eigenvec <- read.table("mmc2/Qatart156_filtered_pruned_pca.eigenvec", header = TRUE)
+
+# Read the metabolites data
+metabolites <- read.csv("Qattari_Metabolites - Dataset.csv")
+corrected_metabolites <- list()
+
+# Define the metabolite names from your metabolites data frame
+metabolite_names <- names(metabolites)[-1]
+
+# Read the GDS file again using GdsGenotypeReader from GWASTools
+gds_reader <- GdsGenotypeReader(gds_file)
+
+results <- list()
+significant_results <- data.frame()
+
+rownames(kinship_matrix) <- colnames(kinship_matrix) <- metabolites$Sample
+
+for (metabolite_name in metabolite_names) {
+  # Prepare the dataframe for ScanAnnotationDataFrame
+  annot_data <- data.frame(
+    scanID = metabolites$Sample,
+    PC1 = pca_eigenvec$PC1,
+    PC2 = pca_eigenvec$PC2,
+    PC3 = pca_eigenvec$PC3,
+    pheno = metabolites[[metabolite_name]]
+  )
+  
+  # Create ScanAnnotationDataFrame
+  scanAnnot <- ScanAnnotationDataFrame(annot_data)
+  
+  # Fit the null model
+  null_model <- fitNullModel(
+    scanAnnot,
+    outcome = "pheno",
+    covars = c("PC1", "PC2", "PC3"),
+    cov.mat = kinship_matrix, 
+    family = "gaussian"
+  )
+  
+  # Save corrected metabolites
+  corrected_metabolites[[metabolite_name]] <- null_model
+  
+  # Read the SNPs using GenotypeData
+  geno_data <- GenotypeData(gds_reader, scanAnnot = scanAnnot)
+  
+  # Create an iterator over all SNPs
+  iterator <- GenotypeBlockIterator(geno_data)
+  
+  # Perform association testing
+  assoc_results <- assocTestSingle(iterator, null.model = null_model)
+  
+  # Filter results with p-value < 0.01
+  significant_assoc <- assoc_results[assoc_results$Score.pval < 0.01, ]
+  significant_assoc <- significant_assoc %>%
+    mutate(effectAllele = effectAllele(geno_data, variant.id = variant.id)$effect.allele) %>%
+    select(variant.id, Est, Score.SE, effectAllele, n.obs, Score.pval) 
+    
+  # Add the metabolite name to the results
+  significant_assoc$Metabolite <- metabolite_name
+  
+  significant_results <- rbind(significant_results, significant_assoc)
+  
+  
+  # Store association results
+  results[[metabolite_name]] <- assoc_results
+  
+  # Report heritability
+  print(metabolite_name)
+  print(varCompCI(null_model, prop = TRUE))
+}
+
+```
+``` {r}
+# Save significant results to a CSV file
+write.csv(significant_results, file = "significant_results.csv")
+```
+## Refernces
+- http://bio3.giga.ulg.ac.be/archana_bhardwaj/userfiles/downloads/2018/GBIO0002/Lecture%204/Lecture_2_3.pdf
+- https://www.rdocumentation.org/packages/SNPRelate/versions/1.6.4/topics/snpgdsIBDMLE
+
